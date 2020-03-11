@@ -21,6 +21,7 @@ use futures::{
     future::{join_all, try_join_all},
     Stream, StreamExt, TryFutureExt,
 };
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use std::{collections::HashMap, io, net::SocketAddr, time::Duration};
 
@@ -159,6 +160,7 @@ impl ApiManager {
         while let Some(request) = endpoints_rx.next().await {
             log::info!("Server restart requested");
             self.stop_servers().await;
+            tokio::time::delay_for(std::time::Duration::from_millis(5_000)).await;
             self.endpoints = request.endpoints;
             self.start_servers().await?;
         }
@@ -174,13 +176,23 @@ impl ApiManager {
         let listen_address = server_config.listen_address;
         log::info!("Starting {} web api on {}", access, listen_address);
 
+        let domain = match listen_address {
+            SocketAddr::V4(_) => Domain::ipv4(),
+            SocketAddr::V6(_) => Domain::ipv6(),
+        };
+        let socket = Socket::new(domain, Type::stream(), Some(Protocol::tcp()))?;
+        socket.set_reuse_address(false)?;
+        socket.bind(&SockAddr::from(listen_address))?;
+        socket.listen(1024)?;
+        let listener = socket.into_tcp_listener();
+
         let server = HttpServer::new(move || {
             App::new()
                 .wrap(server_config.cors_factory())
                 .service(aggregator.extend_backend(access, web::scope("api")))
         })
         .disable_signals()
-        .bind(listen_address)?
+        .listen(listener)?
         .run();
         Ok(server)
     }
